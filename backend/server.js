@@ -637,7 +637,11 @@ function normalizeAuditTimestamp(timestamp) {
   return date.toISOString().slice(0, 19).replace("T", " ");
 }
 
-async function loadCourseContentMap(userId = null, includeAllSubmissions = false) {
+async function loadCourseContentMap(
+  userId = null,
+  includeAllSubmissions = false,
+  includeCorrectAnswers = false
+) {
   const [materials] = await pool.execute(
     "SELECT * FROM course_materials ORDER BY course_id, id"
   );
@@ -663,6 +667,15 @@ async function loadCourseContentMap(userId = null, includeAllSubmissions = false
   const [questions] = await pool.execute(
     "SELECT * FROM quiz_questions ORDER BY quiz_id, id"
   );
+  const [quizAttempts] =
+    userId && !includeCorrectAnswers
+      ? await pool.execute(
+          `SELECT id, quiz_id, answers, results, score, submitted_at
+           FROM quiz_attempts
+           WHERE user_id = ?`,
+          [userId]
+        )
+      : [[]];
   const [auditEntries] = await pool.execute(
     "SELECT * FROM course_audit_log ORDER BY course_id, created_at DESC, id DESC"
   );
@@ -748,13 +761,31 @@ async function loadCourseContentMap(userId = null, includeAllSubmissions = false
         id: question.id,
         question: question.question,
         options: normalizeQuizOptions(question.options),
-        answer: question.answer,
+        ...(includeCorrectAnswers ? { answer: question.answer } : {}),
       }));
+    const attempt = quizAttempts.find(
+      (quizAttempt) => Number(quizAttempt.quiz_id) === Number(item.id)
+    );
 
     contentMap[item.course_id].quizzes.push({
       id: item.id,
       title: item.title,
       questions: quizQuestions,
+      attempt: attempt
+        ? {
+            id: attempt.id,
+            answers:
+              typeof attempt.answers === "string"
+                ? JSON.parse(attempt.answers)
+                : attempt.answers,
+            results:
+              typeof attempt.results === "string"
+                ? JSON.parse(attempt.results)
+                : attempt.results,
+            score: Number(attempt.score),
+            submittedAt: attempt.submitted_at,
+          }
+        : null,
     });
   }
 
@@ -807,7 +838,11 @@ function withCourseContent(courses, contentMap = {}) {
   });
 }
 
-async function fetchCourses(userId = null, includeAllSubmissions = false) {
+async function fetchCourses(
+  userId = null,
+  includeAllSubmissions = false,
+  includeCorrectAnswers = false
+) {
   const [courses] = await pool.execute(
     `SELECT c.*,
        (SELECT COUNT(*) FROM course_lessons l WHERE l.course_id = c.id) AS lesson_count,
@@ -820,7 +855,11 @@ async function fetchCourses(userId = null, includeAllSubmissions = false) {
     [userId]
   );
 
-  const contentMap = await loadCourseContentMap(userId, includeAllSubmissions);
+  const contentMap = await loadCourseContentMap(
+    userId,
+    includeAllSubmissions,
+    includeCorrectAnswers
+  );
   return withCourseContent(courses, contentMap);
 }
 
@@ -839,7 +878,7 @@ app.get(
   requireRole("admin"),
   async (req, res) => {
     try {
-      return res.json(await fetchCourses(req.user.id, true));
+      return res.json(await fetchCourses(req.user.id, true, true));
     } catch (error) {
       console.error("Admin course query failed:", error.message);
       return res.status(500).json({ message: "Unable to fetch courses." });
@@ -897,6 +936,7 @@ app.get(
 
       const courseContent = await loadCourseContentMap(
         req.user.id,
+        req.user.role === "admin",
         req.user.role === "admin"
       );
       return res.json(courseContent[courseId] || {
@@ -908,6 +948,143 @@ app.get(
     } catch (error) {
       console.error("Course content query failed:", error.message);
       return res.status(500).json({ message: "Unable to fetch course content." });
+    }
+  }
+);
+
+app.post(
+  "/api/courses/:courseId/quizzes/:quizId/attempts",
+  authenticateToken,
+  requireRole("student"),
+  async (req, res) => {
+    const courseId = getCourseId(req.params.courseId);
+    const quizId = getCourseId(req.params.quizId);
+    const answers = req.body?.answers;
+
+    if (
+      !courseId ||
+      !quizId ||
+      !answers ||
+      typeof answers !== "object" ||
+      Array.isArray(answers)
+    ) {
+      return res.status(400).json({ message: "Valid quiz answers are required." });
+    }
+
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      await connection.beginTransaction();
+
+      const [quizzes] = await connection.execute(
+        "SELECT id FROM course_quizzes WHERE id = ? AND course_id = ? FOR UPDATE",
+        [quizId, courseId]
+      );
+      if (quizzes.length === 0) {
+        await connection.rollback();
+        return res.status(404).json({ message: "Quiz not found in this course." });
+      }
+
+      const [existingAttempts] = await connection.execute(
+        `SELECT id, answers, results, score, submitted_at
+         FROM quiz_attempts
+         WHERE quiz_id = ? AND user_id = ?`,
+        [quizId, req.user.id]
+      );
+      if (existingAttempts.length > 0) {
+        await connection.commit();
+        const existingAttempt = existingAttempts[0];
+        return res.json({
+          id: existingAttempt.id,
+          answers:
+            typeof existingAttempt.answers === "string"
+              ? JSON.parse(existingAttempt.answers)
+              : existingAttempt.answers,
+          results:
+            typeof existingAttempt.results === "string"
+              ? JSON.parse(existingAttempt.results)
+              : existingAttempt.results,
+          score: Number(existingAttempt.score),
+          submittedAt: existingAttempt.submitted_at,
+        });
+      }
+
+      const [questions] = await connection.execute(
+        `SELECT id, options, answer
+         FROM quiz_questions
+         WHERE quiz_id = ?
+         ORDER BY id`,
+        [quizId]
+      );
+      if (questions.length === 0) {
+        await connection.rollback();
+        return res.status(400).json({ message: "This quiz has no questions." });
+      }
+
+      const questionIds = questions.map((question) => String(question.id));
+      const submittedIds = Object.keys(answers);
+      if (
+        submittedIds.length !== questionIds.length ||
+        submittedIds.some((id) => !questionIds.includes(id))
+      ) {
+        await connection.rollback();
+        return res.status(400).json({
+          message: "Submit one answer for every question in this quiz.",
+        });
+      }
+
+      const normalizedAnswers = {};
+      const results = [];
+      for (const question of questions) {
+        const questionId = String(question.id);
+        const selectedAnswer = answers[questionId];
+        const options =
+          typeof question.options === "string"
+            ? JSON.parse(question.options)
+            : question.options;
+        if (
+          typeof selectedAnswer !== "string" ||
+          !Array.isArray(options) ||
+          !options.includes(selectedAnswer)
+        ) {
+          await connection.rollback();
+          return res.status(400).json({ message: "A submitted answer is invalid." });
+        }
+        normalizedAnswers[questionId] = selectedAnswer;
+        results.push({
+          questionId: question.id,
+          correct: selectedAnswer === question.answer,
+        });
+      }
+
+      const score = results.filter((result) => result.correct).length;
+      const [attemptResult] = await connection.execute(
+        `INSERT INTO quiz_attempts
+          (quiz_id, user_id, answers, results, score)
+         VALUES (?, ?, ?, ?, ?)`,
+        [
+          quizId,
+          req.user.id,
+          JSON.stringify(normalizedAnswers),
+          JSON.stringify(results),
+          score,
+        ]
+      );
+      await connection.commit();
+
+      return res.status(201).json({
+        id: attemptResult.insertId,
+        answers: normalizedAnswers,
+        results,
+        score,
+        submittedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      if (connection) await connection.rollback();
+      console.error("Quiz submission failed:", error.message);
+      return res.status(500).json({ message: "Unable to submit quiz." });
+    } finally {
+      if (connection) connection.release();
     }
   }
 );
@@ -1391,6 +1568,7 @@ app.put(
           return res.status(404).json({ message: "Quiz not found." });
         }
 
+        await connection.execute("DELETE FROM quiz_attempts WHERE quiz_id = ?", [quizId]);
         await connection.execute("DELETE FROM quiz_questions WHERE quiz_id = ?", [quizId]);
 
         const values = questions.map((question) => [
@@ -1444,6 +1622,7 @@ app.delete(
         return res.status(404).json({ message: "Quiz not found." });
       }
 
+      await pool.execute("DELETE FROM quiz_attempts WHERE quiz_id = ?", [quizId]);
       await pool.execute("DELETE FROM quiz_questions WHERE quiz_id = ?", [quizId]);
       await logAudit(courseId, req.user?.name || "Admin", "Deleted a quiz");
       return res.json({ message: "Quiz deleted." });
@@ -1571,6 +1750,10 @@ app.delete(
       await connection.execute("DELETE FROM course_materials WHERE course_id = ?", [courseId]);
       await connection.execute("DELETE FROM course_assignments WHERE course_id = ?", [courseId]);
       await connection.execute(
+        "DELETE FROM quiz_attempts WHERE quiz_id IN (SELECT id FROM course_quizzes WHERE course_id = ?)",
+        [courseId]
+      );
+      await connection.execute(
         "DELETE FROM quiz_questions WHERE quiz_id IN (SELECT id FROM course_quizzes WHERE course_id = ?)",
         [courseId]
       );
@@ -1605,7 +1788,13 @@ app.get(
   authenticateToken,
   async (req, res) => {
   try {
-      return res.json(await fetchCourses(req.user.id, req.user.role === "admin"));
+      return res.json(
+        await fetchCourses(
+          req.user.id,
+          req.user.role === "admin",
+          req.user.role === "admin"
+        )
+      );
   } catch (error) {
     console.error("Course query failed:", error.message);
 
@@ -1956,6 +2145,19 @@ async function startServer() {
         answer VARCHAR(255) NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_quiz_questions_quiz (quiz_id)
+      ) ENGINE=InnoDB
+    `);
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS quiz_attempts (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        quiz_id BIGINT UNSIGNED NOT NULL,
+        user_id BIGINT UNSIGNED NOT NULL,
+        answers JSON NOT NULL,
+        results JSON NOT NULL,
+        score INT UNSIGNED NOT NULL,
+        submitted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_quiz_attempt (quiz_id, user_id),
+        INDEX idx_quiz_attempts_user (user_id)
       ) ENGINE=InnoDB
     `);
     await connection.query(`

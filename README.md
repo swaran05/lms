@@ -11,7 +11,7 @@ LearnSpace is a learning management system (LMS) for organizing courses and supp
 - **Course overview:** Review the instructor and course description, track lesson completion, and see progress.
 - **Lessons:** Mark course lessons complete. Completion is saved to the database per student.
 - **Learning materials:** Read text materials and download course PDFs.
-- **Quizzes:** Answer course quiz questions, submit answers for immediate scoring, review correct and incorrect choices, and try again.
+- **Quizzes:** Answer course quiz questions and submit for server-side scoring. Students receive one saved attempt per quiz; their chosen answers and score remain available when they return to the course.
 - **Assignments:** Review assignment instructions and due dates, upload a PDF submission, replace a previous submission, and download your submitted file.
 - **Discussion forum:** Post questions or comments in the discussion view.
 - **Announcements:** View LMS announcements.
@@ -23,7 +23,7 @@ LearnSpace is a learning management system (LMS) for organizing courses and supp
 - **Lesson management:** Add, rename, and delete lessons belonging to a course.
 - **Learning materials:** Add text content or upload PDF materials to a specific course; download or remove materials.
 - **Assignments:** Create assignments with instructions and due dates, review student PDF submissions, download submissions, and remove assignments.
-- **Quizzes:** Create course quizzes with a question and multiple-choice answers, choose the correct answer, and remove quizzes.
+- **Quizzes:** Create course quizzes with a question and multiple-choice answers, choose the correct answer, and remove quizzes. Correct answers are available only to administrators; editing a quiz clears existing student attempts.
 - **Administrator profile:** See administrator account details and shortcuts to course management and the audit log.
 
 Administrators access these controls by signing in with an account whose database role is `admin`. Public registration creates student accounts only. Have a trusted database administrator assign administrator roles; do not expose database credentials or create a public admin-registration flow.
@@ -46,7 +46,7 @@ Administrators access these controls by signing in with an account whose databas
 
 ### 1. Prepare MySQL
 
-Create a database named `lms`. The backend expects the application’s `users` and `courses` tables to exist. It creates the course lessons, lesson progress, materials, assignments, quiz, audit, and assignment submission tables when it starts. If your project does not already have the `users` and `courses` schema, create those tables before starting the backend.
+Create a database named `lms`. The backend expects the application’s `users` and `courses` tables to exist. It creates the course lessons, lesson progress, materials, assignments, quiz, quiz attempt, audit, and assignment submission tables when it starts. If your project does not already have the `users` and `courses` schema, create those tables before starting the backend.
 
 ### 2. Configure the backend
 
@@ -120,6 +120,7 @@ Open the local URL printed by Vite, normally `http://localhost:5173`. The backen
 - PDF materials and assignment submissions are saved under `backend/uploads/`; that folder is ignored by Git.
 - Uploads are limited to one PDF at a time and 10 MB per file. The server checks the PDF signature as well as the file type and extension.
 - PDF downloads require a valid login. Students can only download their own assignment submissions; administrators can review submissions.
+- Correct quiz answers are not sent to student course views. Quiz scoring is performed by the backend, and each student can submit one attempt per quiz.
 - Back up the MySQL database and `backend/uploads/` together. Deleting a course or its assignments also removes their associated uploaded files.
 - Local disk storage is intended for development or a single-server deployment. Use private shared object storage for a multi-server or production deployment.
 

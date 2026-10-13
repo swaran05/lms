@@ -83,7 +83,6 @@ const defaultCourseContent = {
             id: 1,
             question: "Which element is used to define the main content of a document?",
             options: ["<header>", "<main>", "<footer>", "<section>"],
-            answer: "<main>",
           },
         ],
       },
@@ -119,7 +118,6 @@ const defaultCourseContent = {
             id: 1,
             question: "Which library is commonly used for data manipulation in Python?",
             options: ["Django", "Pandas", "Express", "Flask"],
-            answer: "Pandas",
           },
         ],
       },
@@ -155,7 +153,6 @@ const defaultCourseContent = {
             id: 1,
             question: "Which SQL statement retrieves rows from a table?",
             options: ["INSERT", "UPDATE", "SELECT", "DELETE"],
-            answer: "SELECT",
           },
         ],
       },
@@ -196,7 +193,6 @@ const defaultCourseContent = {
               "The model is too simple",
               "The model is not trained",
             ],
-            answer: "The model learns noise instead of general patterns",
           },
         ],
       },
@@ -560,6 +556,32 @@ function App() {
       setAssignmentFiles((previous) => ({ ...previous, [assignmentId]: null }));
       await refreshCourses(isAdmin);
       showNotice("Assignment PDF submitted.");
+    } catch (error) {
+      setCourseActionError(error.message);
+    }
+  }
+
+  async function submitQuizAttempt(quiz, quizKey) {
+    if (!selectedCourse) return;
+
+    const answers = Object.fromEntries(
+      quiz.questions.map((item) => [
+        String(item.id),
+        quizAnswers[`${quizKey}-${item.id}`],
+      ])
+    );
+    setCourseActionError("");
+    try {
+      const attempt = await apiRequest(
+        authToken,
+        `/courses/${selectedCourse.id}/quizzes/${quiz.id}/attempts`,
+        { method: "POST", body: JSON.stringify({ answers }) }
+      );
+      setSubmittedQuizzes((previous) => ({
+        ...previous,
+        [quizKey]: attempt,
+      }));
+      showNotice("Quiz submitted.");
     } catch (error) {
       setCourseActionError(error.message);
     }
@@ -2359,7 +2381,8 @@ function App() {
                 ) : (
                   selectedCourse.quizzes.map((quiz) => {
                     const quizKey = `${selectedCourse.id}-${quiz.id}`;
-                    const quizIsSubmitted = Boolean(submittedQuizzes[quizKey]);
+                    const quizAttempt = quiz.attempt || submittedQuizzes[quizKey];
+                    const quizIsSubmitted = Boolean(quizAttempt);
 
                     return (
                       <article className="course-material-item" key={quizKey}>
@@ -2380,16 +2403,31 @@ function App() {
                             <div className="quiz-options">
                               {item.options.map((option) => {
                                 const answerKey = `${quizKey}-${item.id}`;
-                                const isCorrect = quizIsSubmitted && option === item.answer;
+                                const selectedAnswer =
+                                  quizAttempt?.answers?.[String(item.id)] ??
+                                  quizAnswers[answerKey];
+                                const questionResult = quizAttempt?.results?.find(
+                                  (result) =>
+                                    Number(result.questionId) === Number(item.id)
+                                );
+                                const isCorrect = isAdmin
+                                  ? option === item.answer
+                                  : Boolean(
+                                      questionResult?.correct &&
+                                        selectedAnswer === option
+                                    );
                                 const isWrong =
-                                  quizIsSubmitted &&
-                                  quizAnswers[answerKey] === option &&
-                                  option !== item.answer;
+                                  !isAdmin &&
+                                  Boolean(
+                                    questionResult &&
+                                      !questionResult.correct &&
+                                      selectedAnswer === option
+                                  );
 
                                 return (
                                   <label
                                     className={`quiz-option ${
-                                      quizAnswers[answerKey] === option ? "selected" : ""
+                                      selectedAnswer === option ? "selected" : ""
                                     } ${isCorrect ? "correct" : ""} ${isWrong ? "incorrect" : ""}`}
                                     key={option}
                                   >
@@ -2397,8 +2435,8 @@ function App() {
                                       type="radio"
                                       name={`question-${quizKey}-${item.id}`}
                                       value={option}
-                                      checked={quizAnswers[answerKey] === option}
-                                      disabled={quizIsSubmitted}
+                                      checked={selectedAnswer === option}
+                                      disabled={isAdmin || quizIsSubmitted}
                                       onChange={() =>
                                         setQuizAnswers((previous) => ({
                                           ...previous,
@@ -2417,63 +2455,35 @@ function App() {
                         {quizIsSubmitted && (
                           <div className="quiz-result">
                             <h3>
-                              Your score:{" "}
-                              {quiz.questions.filter(
-                                (item) =>
-                                  quizAnswers[`${quizKey}-${item.id}`] === item.answer
-                              ).length}
+                              Your score: {quizAttempt.score}
                               /{quiz.questions.length}
                             </h3>
                             <p>
-                              {quiz.questions.every(
-                                (item) =>
-                                  quizAnswers[`${quizKey}-${item.id}`] === item.answer
-                              )
+                              {quizAttempt.score === quiz.questions.length
                                 ? "Excellent work!"
                                 : "Review the highlighted answers and keep practicing."}
                             </p>
                           </div>
                         )}
 
-                        <div className="button-row">
-                          {quizIsSubmitted ? (
-                            <button
-                              className="primary-button"
-                              type="button"
-                              onClick={() => {
-                                setQuizAnswers((previous) => {
-                                  const next = { ...previous };
-                                  quiz.questions.forEach((item) => {
-                                    delete next[`${quizKey}-${item.id}`];
-                                  });
-                                  return next;
-                                });
-                                setSubmittedQuizzes((previous) => ({
-                                  ...previous,
-                                  [quizKey]: false,
-                                }));
-                              }}
-                            >
-                              Try again
-                            </button>
-                          ) : (
+                        {isAdmin ? (
+                          <p className="muted">Correct answers are marked above for course administration.</p>
+                        ) : !quizIsSubmitted ? (
+                          <div className="button-row">
                             <button
                               className="primary-button"
                               type="button"
                               disabled={quiz.questions.some(
                                 (item) => !quizAnswers[`${quizKey}-${item.id}`]
                               )}
-                              onClick={() =>
-                                setSubmittedQuizzes((previous) => ({
-                                  ...previous,
-                                  [quizKey]: true,
-                                }))
-                              }
+                              onClick={() => submitQuizAttempt(quiz, quizKey)}
                             >
                               Submit quiz
                             </button>
-                          )}
-                        </div>
+                          </div>
+                        ) : (
+                          <p className="muted">This quiz attempt has been submitted.</p>
+                        )}
                       </article>
                     );
                   })
